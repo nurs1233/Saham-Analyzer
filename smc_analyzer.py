@@ -25,10 +25,41 @@ class SMCAnalyzer:
         """Ambil data OHLCV dari yfinance"""
         print(f"📡 Mengambil data {self.symbol} ({self.period} | {self.interval})...")
         df = yf.download(self.symbol, period=self.period, interval=self.interval, auto_adjust=True, progress=False)
-        # Bersihkan kolom multi-index jika ada
+        
+        # Handle multi-level columns from newer yfinance versions
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-        df.dropna(inplace=True)
+        
+        # Reset index to make 'Date' a column if it's the index
+        df = df.reset_index()
+        
+        # Ensure required columns exist and rename if necessary
+        required_cols = {'Date', 'Open', 'High', 'Low', 'Close', 'Volume'}
+        current_cols = set(df.columns)
+        
+        # Handle different column naming conventions
+        col_mapping = {}
+        for col in current_cols:
+            col_lower = col.lower()
+            if col_lower == 'date':
+                col_mapping[col] = 'Date'
+            elif col_lower == 'open':
+                col_mapping[col] = 'Open'
+            elif col_lower == 'high':
+                col_mapping[col] = 'High'
+            elif col_lower == 'low':
+                col_mapping[col] = 'Low'
+            elif col_lower == 'close':
+                col_mapping[col] = 'Close'
+            elif col_lower == 'volume':
+                col_mapping[col] = 'Volume'
+        
+        df = df.rename(columns=col_mapping)
+        
+        # Drop rows with missing required data
+        df.dropna(subset=['High', 'Low', 'Close'], inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        
         self.df = df
         return self.df
 
@@ -40,22 +71,22 @@ class SMCAnalyzer:
         df['swing_low'] = np.nan
 
         for i in range(w, len(df) - w):
-            if df['high'].iloc[i] > df['high'].iloc[i-w:i].max() and df['high'].iloc[i] > df['high'].iloc[i+1:i+w+1].max():
-                df.at[df.index[i], 'swing_high'] = df['high'].iloc[i]
-            if df['low'].iloc[i] < df['low'].iloc[i-w:i].min() and df['low'].iloc[i] < df['low'].iloc[i+1:i+w+1].min():
-                df.at[df.index[i], 'swing_low'] = df['low'].iloc[i]
+            if df['High'].iloc[i] > df['High'].iloc[i-w:i].max() and df['High'].iloc[i] > df['High'].iloc[i+1:i+w+1].max():
+                df.at[df.index[i], 'swing_high'] = df['High'].iloc[i]
+            if df['Low'].iloc[i] < df['Low'].iloc[i-w:i].min() and df['Low'].iloc[i] < df['Low'].iloc[i+1:i+w+1].min():
+                df.at[df.index[i], 'swing_low'] = df['Low'].iloc[i]
         self.df = df
 
     def detect_fvg(self):
         """Deteksi Fair Value Gaps (Imbalance)"""
         df = self.df
         # Bullish FVG: low[i] > high[i-2]
-        df['bullish_fvg'] = (df['low'].shift(0) > df['high'].shift(2))
+        df['bullish_fvg'] = (df['Low'].shift(0) > df['High'].shift(2))
         # Bearish FVG: high[i] < low[i-2]
-        df['bearish_fvg'] = (df['high'].shift(0) < df['low'].shift(2))
+        df['bearish_fvg'] = (df['High'].shift(0) < df['Low'].shift(2))
         # Simpan batas zona FVG untuk plotting
-        df['fvg_top'] = np.where(df['bullish_fvg'], df['high'].shift(2), np.where(df['bearish_fvg'], df['high'], np.nan))
-        df['fvg_bottom'] = np.where(df['bullish_fvg'], df['low'], np.where(df['bearish_fvg'], df['low'].shift(2), np.nan))
+        df['fvg_top'] = np.where(df['bullish_fvg'], df['High'].shift(2), np.where(df['bearish_fvg'], df['High'], np.nan))
+        df['fvg_bottom'] = np.where(df['bullish_fvg'], df['Low'], np.where(df['bearish_fvg'], df['Low'].shift(2), np.nan))
         self.df = df
 
     def detect_structure_signals(self):
@@ -121,10 +152,10 @@ class SMCAnalyzer:
             prev_sl = swing_lows[swing_lows.index < df.index[i]].min() if len(swing_lows[swing_lows.index < df.index[i]]) > 0 else np.nan
 
             # Sweep High: Wick menembus swing high, tapi close di bawahnya
-            if pd.notna(prev_sh) and df['high'].iloc[i] > prev_sh and df['close'].iloc[i] < prev_sh:
+            if pd.notna(prev_sh) and df['High'].iloc[i] > prev_sh and df['Close'].iloc[i] < prev_sh:
                 df.at[df.index[i], 'sweep_high'] = True
             # Sweep Low: Wick menembus swing low, tapi close di atasnya
-            if pd.notna(prev_sl) and df['low'].iloc[i] < prev_sl and df['close'].iloc[i] > prev_sl:
+            if pd.notna(prev_sl) and df['Low'].iloc[i] < prev_sl and df['Close'].iloc[i] > prev_sl:
                 df.at[df.index[i], 'sweep_low'] = True
         self.df = df
 
@@ -140,8 +171,8 @@ class SMCAnalyzer:
             eq = (range_high + range_low) / 2
             
             df['equilibrium'] = eq
-            df['in_discount'] = df['close'] < eq
-            df['in_premium'] = df['close'] > eq
+            df['in_discount'] = df['Close'] < eq
+            df['in_premium'] = df['Close'] > eq
             self.pd_range = (range_low, range_high, eq)
         self.df = df
 
@@ -164,15 +195,15 @@ class SMCAnalyzer:
         fig, ax = plt.subplots(figsize=(14, 8))
         
         # Plot Close Price
-        ax.plot(df.index, df['close'], label='Close Price', color='#1f77b4', linewidth=1.5)
+        ax.plot(df.index, df['Close'], label='Close Price', color='#1f77b4', linewidth=1.5)
 
         # Plot FVG Zones
         fvg_data = df[df['bullish_fvg'] | df['bearish_fvg']]
         for _, row in fvg_data.iterrows():
             if row['bullish_fvg']:
-                ax.axhspan(row['high'].shift(2), row['low'], color='green', alpha=0.2)
+                ax.axhspan(row['High'].shift(2), row['Low'], color='green', alpha=0.2)
             else:
-                ax.axhspan(row['low'].shift(2), row['high'], color='red', alpha=0.2)
+                ax.axhspan(row['Low'].shift(2), row['High'], color='red', alpha=0.2)
 
         # Plot Premium / Discount Zones
         if self.pd_range:
@@ -185,14 +216,14 @@ class SMCAnalyzer:
         signals = df[df['signal'].notna()]
         for _, row in signals.iterrows():
             color = 'green' if 'BULL' in str(row['signal']) else 'red'
-            ax.plot(row.name, df['close'].loc[row.name], '^' if 'BULL' in str(row['signal']) else 'v', 
+            ax.plot(row.name, df['Close'].loc[row.name], '^' if 'BULL' in str(row['signal']) else 'v', 
                     color=color, markersize=10, label=row['signal'])
 
         # Plot Liquidity Sweeps
         sweeps_high = df[df['sweep_high']]
         sweeps_low = df[df['sweep_low']]
-        ax.plot(sweeps_high.index, sweeps_high['high'], 'x', color='darkorange', markersize=8, label='Liquidity Sweep High')
-        ax.plot(sweeps_low.index, sweeps_low['low'], 'x', color='purple', markersize=8, label='Liquidity Sweep Low')
+        ax.plot(sweeps_high.index, sweeps_high['High'], 'x', color='darkorange', markersize=8, label='Liquidity Sweep High')
+        ax.plot(sweeps_low.index, sweeps_low['Low'], 'x', color='purple', markersize=8, label='Liquidity Sweep Low')
 
         ax.set_title(f'📊 Smart Money Concepts Analysis: {self.symbol}', fontsize=16, pad=10)
         ax.set_ylabel('Price', fontsize=12)
@@ -218,7 +249,7 @@ if __name__ == "__main__":
     
     # Tampilkan ringkasan sinyal terbaru
     print("\n📈 Ringkasan Sinyal Terakhir:")
-    summary_cols = ['open', 'high', 'low', 'close', 'swing_high', 'swing_low', 'signal', 'trend']
+    summary_cols = ['Open', 'High', 'Low', 'Close', 'swing_high', 'swing_low', 'signal', 'trend']
     print(df_result[summary_cols].dropna(subset=['signal']).tail(5).to_string())
     
     # Tampilkan chart
